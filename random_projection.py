@@ -47,7 +47,7 @@ def euclidean_distance(vec1, vec2):
     return np.linalg.norm(v1 - v2)
 
 @timeit
-def gaussian_random_projection_fp16(X, n_components, random_state=42, feature_block_size=50_000):
+def gaussian_random_projection_fp16_cpu(X, n_components, random_state=42, feature_block_size=50_000):
     """
     Manual Gaussian Random Projection in FP32 with feature-wise chunking.
 
@@ -81,7 +81,7 @@ def gaussian_random_projection_fp16(X, n_components, random_state=42, feature_bl
     return projected
 
 @timeit
-def gaussian_random_projection_fp16_cuda(X, n_components, random_state=42, feature_block_size=50_000):
+def gaussian_random_projection_fp16_gpu(X, n_components, random_state=42, feature_block_size=50_000):
     """
     Gaussian Random Projection on CUDA using PyTorch.
 
