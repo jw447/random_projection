@@ -99,21 +99,21 @@ def main():
     print(f"Minimum number of components for Gaussian Random Projection: {min_components}")
 
     # Manual Gaussian Random Projection in FP16
-    projected_data = gaussian_random_projection_fp16(
+    Projected_fp16 = gaussian_random_projection_fp16(
         Data_fp16,
         n_components=min_components,
         random_state=42,
         feature_block_size=50_000,
     )
-    print(f"Projected data shape: {projected_data.shape}")
+    print(f"Projected data shape: {Projected_fp16.shape}")
 
     for ts in range(1, 9):
         print(f"Time step {ts}:")
         print(euclidean_distance(Data_fp16[0], Data_fp16[ts]))
-        print(euclidean_distance(projected_data[0], projected_data[ts]))
+        print(euclidean_distance(Projected_fp16[0], Projected_fp16[ts]))
 
     # print(f"Original shape: {Data_fp16.shape}")
-    # print(f"Projected shape: {projected_data.shape}")
+    # print(f"Projected shape: {Projected_fp16.shape}")
 
 if __name__ == "__main__":
     main()
