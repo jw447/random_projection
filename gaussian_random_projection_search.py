@@ -1,7 +1,13 @@
+import argparse
 import numpy as np
-from sklearn.random_projection import johnson_lindenstrauss_min_dim
+from sklearn.random_projection import johnson_lindenstrauss_min_dim, SparseRandomProjection, GaussianRandomProjection
 import time
 from functools import wraps
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 def timeit(func):
     @wraps(func)
@@ -73,47 +79,141 @@ def gaussian_random_projection_fp16(X, n_components, random_state=42, feature_bl
         projected += X[:, start:end].astype(np.float32) @ random_block
 
     return projected
+
+@timeit
+def gaussian_random_projection_fp16_cuda(X, n_components, random_state=42, feature_block_size=50_000):
+    """
+    Gaussian Random Projection on CUDA using PyTorch.
+
+    Uses fp16 for inputs/random matrix multiplication and fp32 for accumulation.
+    Returns a NumPy array on CPU with dtype float32.
+    """
+    if torch is None:
+        raise ImportError("PyTorch is not installed. Install torch with CUDA support to use this function.")
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available. Ensure a CUDA-capable GPU and CUDA-enabled PyTorch are installed.")
+
+    X = np.asarray(X, dtype=np.float16)
+    n_samples, n_features = X.shape
+
+    if n_components <= 0:
+        raise ValueError(f"n_components must be > 0, got {n_components}")
+    if feature_block_size <= 0:
+        raise ValueError(f"feature_block_size must be > 0, got {feature_block_size}")
+    feature_block_size = min(feature_block_size, n_features)
+
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device)
+    generator.manual_seed(random_state)
+
+    X_gpu = torch.from_numpy(X).to(device=device, dtype=torch.float16, non_blocking=True)
+    projected_gpu = torch.zeros((n_samples, n_components), device=device, dtype=torch.float32)
+    scale = np.float32(1.0 / np.sqrt(n_components))
+
+    for start in range(0, n_features, feature_block_size):
+        end = min(start + feature_block_size, n_features)
+        block_width = end - start
+
+        random_block = torch.randn(
+            (block_width, n_components),
+            device=device,
+            dtype=torch.float16,
+            generator=generator,
+        )
+        random_block = random_block * scale
+
+        x_block = X_gpu[:, start:end]
+        block_out = torch.matmul(x_block, random_block).to(torch.float32)
+        projected_gpu += block_out
+
+    return projected_gpu.cpu().numpy()
     
 def main():
-    # Load the raw binary data
-    Data_fp16 = []
-    for ts in range(1, 10):  # Assuming we have 10 time steps
-        input_file = f"CLOUDf0{ts}.bin" 
-        raw = load_raw_binary(input_file, dtype=np.float32, shape=(500, 500, 100))
+    parser = argparse.ArgumentParser(description="Compare pairwise distances before/after random projection.")
+    parser.add_argument(
+        "--projection-method",
+        choices=["manual_cpu", "manual_cuda", "sklearn_sparse", "sklearn_gaussian"],
+        default="manual_cuda",
+        help="Projection backend to use",
+    )
+    args = parser.parse_args()
+
+    data_dir = "/home/jwang96/datasets/Hurricane_new/clean-data-Jinyang/"
+    field_name = ["CLOUD", "P", "PRECIP", "QCLOUD", "QGRAUP", "QICE", "QRAIN", "QSNOW", "QVAPOR", "TC", "U", "V", "W"]
+    projection_method = args.projection_method
+
+    timestep = 24
+    data_shape = (500, 500, 100)
+
+    field_vectors = {}
+    for field in field_name:
+        input_file = f"{data_dir}/{field}/{field}f{timestep:02d}.bin"
+        raw = load_raw_binary(input_file, dtype=np.float32, shape=data_shape)
         if raw is None:
             return
-        data_fp16 = raw.astype(np.float16)
-        
-        data_fp16_s = data_fp16.reshape(25_000_000)
-        # data_fp16_s = data_fp16_s[50*250_000:100*250_000]  # Use only the 50th block of 250,000 elements for testing
-        Data_fp16.append(data_fp16_s)
-    
-    Data_fp16 = np.array(Data_fp16)
-    print(f"Loaded data shape: {Data_fp16.shape}")
+        field_vectors[field] = raw.reshape(-1)
 
-    # Determine the minimum number of components for Gaussian Random Projection
-    eps = 0.1  # Set the desired distortion level
-    n_samples = Data_fp16.shape[0]
+    print(f"Loaded timestep f{timestep:02d} for {len(field_vectors)} fields")
+
+    n_samples = len(field_name)
+    eps = 0.1
     min_components = johnson_lindenstrauss_min_dim(n_samples=n_samples, eps=eps)
-    
-    print(f"Minimum number of components for Gaussian Random Projection: {min_components}")
+    print(f"Minimum number of components for Random Projection: {min_components}")
 
-    # Manual Gaussian Random Projection in FP16
-    Projected_fp16 = gaussian_random_projection_fp16(
-        Data_fp16,
-        n_components=min_components,
-        random_state=42,
-        feature_block_size=50_000,
-    )
-    print(f"Projected data shape: {Projected_fp16.shape}")
+    # performing Random Projection using the selected method
+    data_matrix = np.stack([field_vectors[field] for field in field_name], axis=0)
+    if projection_method == "manual_cuda":
+        if torch is None or not torch.cuda.is_available():
+            print("CUDA backend unavailable; falling back to manual CPU projection")
+            projected_matrix = gaussian_random_projection_fp16(
+                data_matrix,
+                n_components=min_components,
+                random_state=42,
+                feature_block_size=50_000,
+            )
+            print("Projection backend: manual_cpu")
+        else:
+            projected_matrix = gaussian_random_projection_fp16_cuda(
+                data_matrix,
+                n_components=min_components,
+                random_state=42,
+                feature_block_size=50_000,
+            )
+            print("Projection backend: manual_cuda")
+    elif projection_method == "manual_cpu":
+        projected_matrix = gaussian_random_projection_fp16(
+            data_matrix,
+            n_components=min_components,
+            random_state=42,
+            feature_block_size=50_000,
+        )
+        print("Projection backend: manual_cpu")
+    elif projection_method == "sklearn_sparse":
+        transformer = SparseRandomProjection(n_components=min_components, random_state=42)
+        projected_matrix = transformer.fit_transform(data_matrix).astype(np.float32)
+        print("Projection backend: sklearn_sparse")
+    elif projection_method == "sklearn_gaussian":
+        transformer = GaussianRandomProjection(n_components=min_components, random_state=42)
+        projected_matrix = transformer.fit_transform(data_matrix).astype(np.float32)
+        print("Projection backend: sklearn_gaussian")
+    else:
+        raise ValueError(
+            f"Unknown projection_method='{projection_method}'. "
+            "Choose from: manual_cpu, manual_cuda, sklearn_sparse, sklearn_gaussian"
+        )
 
-    for ts in range(1, 9):
-        print(f"Time step {ts}:")
-        print(euclidean_distance(Data_fp16[0], Data_fp16[ts]))
-        print(euclidean_distance(Projected_fp16[0], Projected_fp16[ts]))
+    projected_vectors = {
+        field: projected_matrix[idx]
+        for idx, field in enumerate(field_name)
+    }
 
-    # print(f"Original shape: {Data_fp16.shape}")
-    # print(f"Projected shape: {Projected_fp16.shape}")
+    print("\nPairwise Euclidean distances:")
+    for i, field_i in enumerate(field_name):
+        for j, field_j in enumerate(field_name):
+            dist_orig = euclidean_distance(field_vectors[field_i], field_vectors[field_j])
+            print(f"Original distance: {field_i:>8} vs {field_j:<8}: {dist_orig:.6e}")
+            dist_proj = euclidean_distance(projected_vectors[field_i], projected_vectors[field_j])
+            print(f"Projected distance: {field_i:>8} vs {field_j:<8}: {dist_proj:.6e}")
 
 if __name__ == "__main__":
     main()
