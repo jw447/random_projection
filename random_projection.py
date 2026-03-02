@@ -33,7 +33,7 @@ def load_raw_binary(path, dtype, shape):
         print(f"[Error] Cannot read raw binary file {path}: {e}")
         return None
 
-@timeit
+# @timeit
 def euclidean_distance(vec1, vec2):
     """
     Calculate Euclidean distance between two vectors.
